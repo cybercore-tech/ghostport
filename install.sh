@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Install GhostPort from the latest GitHub release.
 #
-#   curl -fsSL https://darkstardevx.github.io/ghostport/install.sh | sh
+#   curl -fsSL https://cybercore-tech.github.io/ghostport/install.sh | sh
 #
 # Supported: Linux (x86_64, aarch64) and macOS (x86_64, aarch64).
 set -eu
 
-REPO="darkstardevx/ghostport"
+REPO="cybercore-tech/ghostport"
 INSTALL_DIR="${GHOSTPORT_INSTALL_DIR:-$HOME/.local/bin}"
 
 die() {
