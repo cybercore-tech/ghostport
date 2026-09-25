@@ -645,3 +645,100 @@ async fn data_connection_that_never_sends_a_stream_hello_is_closed_not_left_hang
         "server must close a connection that never sends a StreamHello, not hold it open forever"
     );
 }
+
+/// Found by AgentForge's two-host rehearsal (its P4-M012): a remote worker opens one tunnelled
+/// stream per request (polls, renewals, results), and the per-IP handshake limiter counted every
+/// *successful* handshake too, so a legitimate, pinned peer was cut off after
+/// `MAX_ATTEMPTS_PER_WINDOW` streams in a minute. Only failed or unauthenticated attempts may count.
+#[tokio::test]
+async fn an_authenticated_peer_is_not_throttled_by_its_own_streams() {
+    let server_kp = keys::generate();
+    let client_kp = keys::generate();
+    let control_port = free_port();
+    let data_port = free_port();
+    let local_port = free_port();
+    let target_port = free_port();
+    spawn_echo_server(format!("127.0.0.1:{target_port}")).await;
+
+    let server_config = Config {
+        role: Role::Server,
+        private_key_path: PathBuf::new(),
+        peer_public_key: None,
+        peers: vec![PeerConfig {
+            name: "worker".to_string(),
+            public_key: keys::encode_public_key(&client_kp.public),
+            links: vec!["api".to_string()],
+        }],
+        listen_control: Some(format!("127.0.0.1:{control_port}")),
+        listen_data: Some(format!("127.0.0.1:{data_port}")),
+        listen_udp: None,
+        server_control_addr: None,
+        server_data_addr: None,
+        server_udp_addr: None,
+        links: vec![LinkConfig {
+            id: "api".to_string(),
+            mode: LinkMode::Forward,
+            transport: Transport::Tcp,
+            listen: None,
+            target: Some(format!("127.0.0.1:{target_port}")),
+        }],
+    };
+    let client_config = Config {
+        role: Role::Client,
+        private_key_path: PathBuf::new(),
+        peer_public_key: Some(keys::encode_public_key(&server_kp.public)),
+        peers: vec![],
+        listen_control: None,
+        listen_data: None,
+        listen_udp: None,
+        server_control_addr: Some(format!("127.0.0.1:{control_port}")),
+        server_data_addr: Some(format!("127.0.0.1:{data_port}")),
+        server_udp_addr: None,
+        links: vec![LinkConfig {
+            id: "api".to_string(),
+            mode: LinkMode::Forward,
+            transport: Transport::Tcp,
+            listen: Some(format!("127.0.0.1:{local_port}")),
+            target: None,
+        }],
+    };
+    let server_state = Arc::new(stats::SharedState::new(&server_config));
+    let client_state = Arc::new(stats::SharedState::new(&client_config));
+    tokio::spawn(server::run(server::Context {
+        config: Arc::new(server_config),
+        private_key: Arc::new(server_kp.private),
+        peers: Arc::new(vec![peermatch::ResolvedPeer {
+            name: "worker".to_string(),
+            public_key: client_kp.public.clone(),
+            links: ["api"].map(String::from).into(),
+        }]),
+        state: server_state.clone(),
+        socket_path: scratch_socket_path("busy-peer-server"),
+    }));
+    tokio::spawn(client::run(client::Context {
+        config: Arc::new(client_config),
+        private_key: Arc::new(client_kp.private),
+        peer_public_key: Arc::new(server_kp.public.clone()),
+        state: client_state,
+        socket_path: scratch_socket_path("busy-peer-client"),
+    }));
+
+    // Well past the per-window budget, well inside one window: every stream must get through.
+    let streams = ratelimit::MAX_ATTEMPTS_PER_WINDOW + 15;
+    for index in 0..streams {
+        let payload = format!("request-{index}");
+        let echoed = tokio::time::timeout(
+            Duration::from_secs(10),
+            round_trip(&format!("127.0.0.1:{local_port}"), payload.as_bytes()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("stream {index} of {streams} timed out (throttled?)"));
+        assert_eq!(echoed, payload.as_bytes(), "stream {index} of {streams}");
+    }
+    assert_eq!(
+        server_state.links["api"]
+            .total_streams
+            .load(std::sync::atomic::Ordering::Relaxed),
+        streams as u64
+    );
+}

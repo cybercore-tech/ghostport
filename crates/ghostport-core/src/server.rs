@@ -277,6 +277,7 @@ async fn run_control_accept_loop(
             };
 
             let authenticated_tx = authenticated_tx.clone();
+            let limiter = limiter.clone();
             let private_key = accept_ctx.private_key.clone();
             let peers = accept_ctx.peers.clone();
             tokio::spawn(async move {
@@ -294,6 +295,8 @@ async fn run_control_accept_loop(
                 drop(permit);
                 match result {
                     Ok(Ok((stream, peer_index))) => {
+                        // An authenticated peer's handshake does not count against its budget.
+                        limiter.forgive(peer_addr.ip()).await;
                         let _ = authenticated_tx
                             .send((stream, peer_addr, peers[peer_index].name.clone()))
                             .await;
@@ -412,8 +415,9 @@ async fn run_data_accept_loop(
 
         let ctx = ctx.clone();
         let pending = pending.clone();
+        let limiter = limiter.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_data_connection(ctx, tcp, pending, permit).await {
+            if let Err(e) = handle_data_connection(ctx, tcp, pending, permit, limiter).await {
                 eprintln!(
                     "ghostport: {}",
                     theme::err(&format!("data connection from {peer_addr}: {e}"))
@@ -428,7 +432,9 @@ async fn handle_data_connection(
     mut tcp: TcpStream,
     pending: PendingStreams,
     permit: OwnedSemaphorePermit,
+    limiter: Arc<HandshakeLimiter>,
 ) -> std::io::Result<()> {
+    let peer_ip = tcp.peer_addr()?.ip();
     let (peer_index, mut tunnel) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         let (peer_index, state) = peermatch::match_peer(&mut tcp, &ctx.private_key, &ctx.peers)
             .await
@@ -450,6 +456,8 @@ async fn handle_data_connection(
         }
     };
     drop(permit);
+    // Authenticated: this stream's handshake does not count against the peer's budget.
+    limiter.forgive(peer_ip).await;
     let matched_peer = &ctx.peers[peer_index];
     let hello: StreamHello =
         match tokio::time::timeout(STREAM_HELLO_TIMEOUT, framing::recv_json(&mut tunnel)).await {

@@ -71,6 +71,23 @@ impl HandshakeLimiter {
         }
         self.concurrent.clone().try_acquire_owned().ok()
     }
+
+    /// Un-counts one attempt for `ip` after its handshake authenticated a pinned peer.
+    ///
+    /// The limiter exists to stop unauthenticated floods, so a successful handshake must not use up
+    /// the budget: every tunnelled stream is its own handshake, and a legitimate, busy peer (for
+    /// example an AgentForge remote worker, one stream per request) would otherwise be cut off
+    /// after `MAX_ATTEMPTS_PER_WINDOW` streams a minute. Only one entry is removed, so failed
+    /// attempts from the same address (say, an attacker behind the same NAT) still count in full.
+    pub async fn forgive(&self, ip: IpAddr) {
+        let mut per_ip = self.per_ip.lock().await;
+        if let Some(attempts) = per_ip.get_mut(&ip) {
+            attempts.pop_back();
+            if attempts.is_empty() {
+                per_ip.remove(&ip);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +118,29 @@ mod tests {
             limiter.try_acquire(ip).await.is_none(),
             "the attempt beyond the per-IP limit should be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn successful_handshakes_do_not_use_up_the_budget_but_failures_do() {
+        let limiter = HandshakeLimiter::new();
+        let ip = test_ip();
+        // Many authenticated handshakes: each attempt is forgiven once it succeeds.
+        for _ in 0..MAX_ATTEMPTS_PER_WINDOW * 3 {
+            assert!(limiter.try_acquire(ip).await.is_some());
+            limiter.forgive(ip).await;
+        }
+        // Failed attempts still count in full, however many successes came before.
+        for _ in 0..MAX_ATTEMPTS_PER_WINDOW {
+            assert!(limiter.try_acquire(ip).await.is_some());
+        }
+        assert!(
+            limiter.try_acquire(ip).await.is_none(),
+            "failures must still exhaust the budget"
+        );
+        // A later success forgives only its own attempt, not the failures.
+        limiter.forgive(ip).await;
+        assert!(limiter.try_acquire(ip).await.is_some());
+        assert!(limiter.try_acquire(ip).await.is_none());
     }
 
     #[tokio::test]

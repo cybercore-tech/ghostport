@@ -28,7 +28,14 @@ What GhostPort's design actually defends against, and what it doesn't
   key can even be checked. Every handshake site has a 10s timeout, and
   `crates/ghostport-core/src/ratelimit.rs` rejects an attempt before it ever starts a
   handshake once a source IP or the global concurrency budget is
-  exhausted.
+  exhausted. Since v0.1.2 an attempt that **authenticates a pinned peer
+  is forgiven** (un-counted) once its handshake completes, so the
+  per-IP budget (10 a minute) only fills with failed or unauthenticated
+  attempts. Every tunnelled stream is its own handshake, so before this
+  a busy legitimate peer (for example an AgentForge remote worker, one
+  stream per request) was cut off after 10 streams a minute. Only that
+  one attempt is forgiven: failed attempts from the same address, such
+  as an attacker behind the same NAT, still count in full.
 - **A stuck/malicious connection blocking the real peer.** The control
   listener no longer handshakes inline in its single accept loop — a
   connection that opens a socket and never sends a byte can no longer
