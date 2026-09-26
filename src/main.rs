@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 #[command(
     name = "ghostport",
-    version = "0.1.0",
+    version,
     about = "Encrypted, NAT-traversing port forwarder"
 )]
 struct Args {
